@@ -20,15 +20,12 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: codeatlas-linux-x86_64
-            use_cross: false
-          - os: macos-13
-            target: x86_64-apple-darwin
-            artifact_name: codeatlas-darwin-x86_64
-            use_cross: false
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: codeatlas-darwin-arm64
-            use_cross: false
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: codeatlas-darwin-x86_64
 
     steps:
       - uses: actions/checkout@v4
@@ -62,18 +59,18 @@ jobs:
 
   publish-crates:
     name: Publish to crates.io
-    needs: [build-release]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Publish to crates.io
         if: env.CARGO_REGISTRY_TOKEN != ''
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           cargo publish -p codeatlas-core
+          echo "Waiting 30 seconds for crates.io index propagation..."
           sleep 30
           cargo publish -p codeatlas
           cargo publish -p codeatlas-mcp
