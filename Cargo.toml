@@ -12,6 +12,10 @@ edition = "2021"
 authors = ["Aditya Pratap Singh <adsingh@zetaglobal.com>"]
 license = "MIT"
 repository = "https://github.com/adityaiitg/codeatlas-rs"
+homepage = "https://github.com/adityaiitg/codeatlas-rs"
+documentation = "https://docs.rs/codeatlas-core"
+keywords = ["code-search", "knowledge-graph", "ast", "tree-sitter", "mcp"]
+categories = ["development-tools", "command-line-utilities"]
 
 [workspace.dependencies]
 anyhow = "1.0"

@@ -1,16 +1,22 @@
 [package]
 name = "codeatlas-mcp"
+description = "Model Context Protocol (MCP) stdio server for CodeAtlas code intelligence"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "codeatlas-mcp"
 path = "src/main.rs"
 
 [dependencies]
-codeatlas-core = { path = "../codeatlas-core" }
+codeatlas-core = { path = "../codeatlas-core", version = "0.1.0" }
 anyhow.workspace = true
 tokio.workspace = true
 serde.workspace = true

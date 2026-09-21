@@ -1,16 +1,22 @@
 [package]
-name = "codeatlas-cli"
+name = "codeatlas"
+description = "Ultra-fast code intelligence and knowledge graph CLI engine in Rust"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "codeatlas"
 path = "src/main.rs"
 
 [dependencies]
-codeatlas-core = { path = "../codeatlas-core" }
+codeatlas-core = { path = "../codeatlas-core", version = "0.1.0" }
 anyhow.workspace = true
 clap.workspace = true
 colored.workspace = true
