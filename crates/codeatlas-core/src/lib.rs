@@ -66,17 +66,25 @@ impl Engine {
     }
 
     pub fn index(&mut self, full: bool) -> Result<IndexReport> {
+        self.index_with_options(full, false)
+    }
+
+    pub fn index_with_options(&mut self, full: bool, fast: bool) -> Result<IndexReport> {
         let start = Instant::now();
 
-        let scanner = FileScanner::new(&self.root_path);
-        let scanned = scanner.scan();
-        let files_scanned = scanned.len();
+        if fast {
+            let _ = self.db.set_fast_mode(true);
+        }
 
         let manifest = if full {
             std::collections::HashMap::new()
         } else {
-            self.db.get_manifest()?
+            self.db.get_manifest_entries()?
         };
+
+        let scanner = FileScanner::new(&self.root_path);
+        let scanned = scanner.scan_with_manifest(&manifest, fast);
+        let files_scanned = scanned.len();
 
         // Determine modified or new files
         let mut files_to_process = Vec::new();
@@ -87,7 +95,7 @@ impl Engine {
             current_file_paths.insert(rel_path.clone());
 
             let needs_index = match manifest.get(&rel_path) {
-                Some(prev_hash) => prev_hash != &file.content_hash,
+                Some(prev) => prev.content_hash != file.content_hash,
                 None => true,
             };
 
@@ -149,6 +157,10 @@ impl Engine {
             )?;
         }
 
+        if fast {
+            let _ = self.db.set_fast_mode(false);
+        }
+
         let duration_ms = start.elapsed().as_millis();
 
         Ok(IndexReport {
@@ -162,8 +174,18 @@ impl Engine {
     }
 
     pub fn search(&self, query: &str, limit: usize, expand_graph: bool) -> Result<Vec<SearchResult>> {
+        self.search_with_options(query, limit, expand_graph, false)
+    }
+
+    pub fn search_with_options(
+        &self,
+        query: &str,
+        limit: usize,
+        expand_graph: bool,
+        fast: bool,
+    ) -> Result<Vec<SearchResult>> {
         let retriever = Retriever::new(self.db.conn(), &self.graph);
-        retriever.search(query, limit, expand_graph)
+        retriever.search_with_options(query, limit, expand_graph, fast)
     }
 
     pub fn impact(&self, target_id: &str) -> Vec<String> {

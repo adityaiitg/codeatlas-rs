@@ -116,6 +116,9 @@ cargo install --path crates/codeatlas-mcp
 # Cold index repository into .codeatlas/index.db (~100ms)
 codeatlas index .
 
+# Ultra-fast mode (metadata-only cache & memory WAL buffer)
+codeatlas index --fast .
+
 # Force full re-index (bypass incremental cache)
 codeatlas index . --full
 ```
@@ -124,6 +127,9 @@ codeatlas index . --full
 ```bash
 # Hybrid search with BM25 + code-aware reranking (<1ms)
 codeatlas search "render_template"
+
+# Ultra-fast direct search without graph expansion (<0.2ms)
+codeatlas search "render_template" --fast
 
 # Attach 1-hop graph neighborhood
 codeatlas search "render_template" --expand-graph

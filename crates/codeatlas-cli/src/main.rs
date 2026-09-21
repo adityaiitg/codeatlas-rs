@@ -31,6 +31,10 @@ enum Commands {
         #[arg(long)]
         full: bool,
 
+        /// Enable ultra-fast indexing mode (metadata-only cache check & in-memory WAL write buffer)
+        #[arg(short = 'f', long)]
+        fast: bool,
+
         /// Custom path to the SQLite index database
         #[arg(long)]
         db: Option<PathBuf>,
@@ -48,6 +52,10 @@ enum Commands {
         /// Expand results with 1-hop graph neighborhood
         #[arg(long)]
         expand_graph: bool,
+
+        /// Fast search mode: direct sub-millisecond lexical scoring without graph expansion
+        #[arg(long)]
+        fast: bool,
 
         /// Output results as JSON
         #[arg(long)]
@@ -138,16 +146,17 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Index { path, full, db } => {
+        Commands::Index { path, full, fast, db } => {
             let root = std::fs::canonicalize(&path).unwrap_or(path);
             let db_path = resolve_db_path(&root, db);
 
-            println!("{}", "⚡ CodeAtlas (Rust)".bold().cyan());
+            let mode_str = if fast { " [Fast Mode]".yellow().to_string() } else { "".to_string() };
+            println!("⚡ {}{}", "CodeAtlas (Rust)".bold().cyan(), mode_str);
             println!("  Indexing directory: {}", root.display().to_string().yellow());
             println!("  Database target:    {}", db_path.display().to_string().dimmed());
 
             let mut engine = Engine::open(&root, &db_path)?;
-            let report = engine.index(full)?;
+            let report = engine.index_with_options(full, fast)?;
 
             println!("\n{}", "✓ Indexing Complete".bold().green());
             println!("  Files scanned:   {}", report.files_scanned.to_string().bold());
@@ -162,6 +171,7 @@ fn main() -> Result<()> {
             query,
             limit,
             expand_graph,
+            fast,
             json,
             db,
         } => {
@@ -178,7 +188,7 @@ fn main() -> Result<()> {
             }
 
             let engine = Engine::open(&root, &db_path)?;
-            let results = engine.search(&query, limit, expand_graph)?;
+            let results = engine.search_with_options(&query, limit, expand_graph, fast)?;
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&results)?);

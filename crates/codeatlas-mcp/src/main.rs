@@ -30,6 +30,11 @@ fn get_tools_def() -> Value {
                         "type": "boolean",
                         "default": true,
                         "description": "Whether to attach 1-hop knowledge graph neighbors"
+                    },
+                    "fast": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Enable fast sub-millisecond lexical scoring without graph expansion"
                     }
                 },
                 "required": ["query"]
@@ -205,8 +210,9 @@ fn handle_tool_call(req_id: &Value, params: &Value, engine: Option<&Engine>) {
             let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
             let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(5) as usize;
             let expand = args.get("expand_graph").and_then(|e| e.as_bool()).unwrap_or(true);
+            let fast = args.get("fast").and_then(|f| f.as_bool()).unwrap_or(false);
 
-            match engine.search(query, limit, expand) {
+            match engine.search_with_options(query, limit, expand, fast) {
                 Ok(results) => json!(results),
                 Err(e) => json!({ "error": e.to_string() }),
             }

@@ -70,6 +70,15 @@ CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_path);
 CREATE INDEX IF NOT EXISTS idx_chunks_symbol ON chunks(symbol_id);
 "#;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ManifestEntry {
+    pub file_path: String,
+    pub content_hash: String,
+    pub mtime: f64,
+    pub size: u64,
+    pub language: Option<String>,
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -242,6 +251,42 @@ impl Database {
         }
 
         Ok(results)
+    }
+
+    pub fn set_fast_mode(&self, enabled: bool) -> Result<()> {
+        if enabled {
+            let _ = self.conn.execute("PRAGMA synchronous = OFF", []);
+            let _ = self.conn.execute("PRAGMA temp_store = MEMORY", []);
+            let _ = self.conn.execute("PRAGMA cache_size = -128000", []);
+        } else {
+            let _ = self.conn.execute("PRAGMA synchronous = NORMAL", []);
+        }
+        Ok(())
+    }
+
+    pub fn get_manifest_entries(&self) -> Result<std::collections::HashMap<String, ManifestEntry>> {
+        let mut stmt = self.conn.prepare("SELECT file_path, content_hash, mtime, size, language FROM file_manifest")?;
+        let rows = stmt.query_map([], |row| {
+            let path: String = row.get(0)?;
+            let hash: String = row.get(1)?;
+            let mtime: f64 = row.get(2).unwrap_or(0.0);
+            let size: i64 = row.get(3).unwrap_or(0);
+            let language: Option<String> = row.get(4).ok();
+            Ok((path.clone(), ManifestEntry {
+                file_path: path,
+                content_hash: hash,
+                mtime,
+                size: size as u64,
+                language,
+            }))
+        })?;
+
+        let mut map = std::collections::HashMap::new();
+        for r in rows {
+            let (p, entry) = r?;
+            map.insert(p, entry);
+        }
+        Ok(map)
     }
 
     pub fn get_manifest(&self) -> Result<std::collections::HashMap<String, String>> {

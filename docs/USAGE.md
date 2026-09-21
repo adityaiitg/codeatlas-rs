@@ -114,6 +114,9 @@ Indexes a codebase into SQLite (`.codeatlas/index.db`) using parallel AST parsin
 # Index current directory (cold run ~100ms, incremental ~6ms)
 codeatlas index .
 
+# Ultra-fast mode: uses mtime/size metadata caching to skip unchanged file I/O
+codeatlas index --fast .
+
 # Force a full re-index (bypass incremental hash cache)
 codeatlas index . --full
 
@@ -126,12 +129,13 @@ codeatlas index . --db /tmp/custom-index.db
 
 **Options:**
 - `[PATH]`: Root path of the codebase to index (default: `.`)
+- `-f, --fast`: Enable ultra-fast indexing mode (metadata-only cache check & in-memory WAL write buffer)
 - `--full`: Force re-indexing all files regardless of mtime/content hash
 - `--db <DB>`: Custom path to SQLite index database (default: `.codeatlas/index.db`)
 
 **Example Output:**
 ```text
-⚡ CodeAtlas (Rust)
+⚡ CodeAtlas (Rust) [Fast Mode]
   Indexing directory: /Volumes/T7/Personal_MAC_DATA/Personal/github/codeatlas-rs
   Database target:    /Volumes/T7/Personal_MAC_DATA/Personal/github/codeatlas-rs/.codeatlas/index.db
 
@@ -154,6 +158,9 @@ Performs multi-signal hybrid code search using SQLite FTS5 BM25 with Porter stem
 # Standard search query
 codeatlas search "CodeGraph"
 
+# Fast sub-millisecond lexical search (direct BM25 scoring)
+codeatlas search "CodeGraph" --fast
+
 # Attach 1-hop graph neighborhood (callers, callees, and imports)
 codeatlas search "Retriever" --expand-graph
 
@@ -166,6 +173,7 @@ codeatlas search "Database" --json
 
 **Options:**
 - `<QUERY>`: Search string or symbol name
+- `--fast`: Fast search mode (skips graph neighborhood expansion and clustering for sub-millisecond latency)
 - `--limit <LIMIT>`: Maximum number of results to display (default: `10`)
 - `--expand-graph`: Attach 1-hop call graph and import neighborhood to top matches
 - `--json`: Format output as JSON

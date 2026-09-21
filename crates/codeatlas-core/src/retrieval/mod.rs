@@ -23,6 +23,16 @@ impl<'a> Retriever<'a> {
     }
 
     pub fn search(&self, query: &str, limit: usize, expand_graph: bool) -> anyhow::Result<Vec<SearchResult>> {
+        self.search_with_options(query, limit, expand_graph, false)
+    }
+
+    pub fn search_with_options(
+        &self,
+        query: &str,
+        limit: usize,
+        expand_graph: bool,
+        fast: bool,
+    ) -> anyhow::Result<Vec<SearchResult>> {
         let clean_q = query.trim().to_lowercase();
         let is_test_query = clean_q.contains("test") || clean_q.contains("spec");
 
@@ -43,15 +53,17 @@ impl<'a> Retriever<'a> {
             .collect::<Vec<_>>()
             .join(" OR ");
 
+        let fts_limit = if fast { limit.max(15) } else { 50 };
+
         let mut stmt = self.conn.prepare(
             "SELECT chunk_id, bm25(chunks_fts) as rank
              FROM chunks_fts
              WHERE chunks_fts MATCH ?1
              ORDER BY rank ASC
-             LIMIT 50",
+             LIMIT ?2",
         )?;
 
-        let rows = stmt.query_map(params![fts_query], |row| {
+        let rows = stmt.query_map(params![fts_query, fts_limit as i64], |row| {
             let chunk_id: String = row.get(0)?;
             let rank: f64 = row.get(1)?;
             Ok((chunk_id, rank as f32))
@@ -137,7 +149,11 @@ impl<'a> Retriever<'a> {
 
             // Noise penalties
             if !is_test_query {
-                if self.test_re.is_match(&fpath) {
+                if fast {
+                    if fpath.contains("test") {
+                        score *= 0.35;
+                    }
+                } else if self.test_re.is_match(&fpath) {
                     score *= 0.35;
                 } else if self.compat_re.is_match(&fpath) {
                     score *= 0.5;
@@ -160,8 +176,8 @@ impl<'a> Retriever<'a> {
             });
         }
 
-        // File coherence boost
-        if !candidates.is_empty() {
+        // File coherence boost (skipped in fast mode)
+        if !fast && !candidates.is_empty() {
             let max_score = candidates.iter().map(|c| c.score).fold(0.0f32, f32::max);
             if max_score > 0.0 {
                 let mut file_scores: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
@@ -189,8 +205,8 @@ impl<'a> Retriever<'a> {
         candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         candidates.truncate(limit);
 
-        // 3. Attach 1-hop graph neighbors if requested
-        if expand_graph {
+        // 3. Attach 1-hop graph neighbors if requested (skipped in fast mode)
+        if !fast && expand_graph {
             for res in &mut candidates {
                 if let Some(ref sym_id) = res.symbol_id {
                     let neighbors = self.graph.expand_neighborhood(&[sym_id.clone()], 1);

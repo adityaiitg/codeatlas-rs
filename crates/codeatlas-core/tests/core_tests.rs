@@ -187,3 +187,33 @@ fn test_database_open_file() {
     assert_eq!(stats["files"], 0);
     let _ = std::fs::remove_file(&temp_db);
 }
+
+#[test]
+fn test_fast_mode_indexing_and_search() {
+    use codeatlas_core::Engine;
+
+    let temp_root = std::env::temp_dir().join("codeatlas_fast_test_root");
+    let _ = std::fs::remove_dir_all(&temp_root);
+    std::fs::create_dir_all(&temp_root).unwrap();
+
+    let sample_code = "def fast_mode_demo():\n    return 'speed'\n";
+    std::fs::write(temp_root.join("demo.py"), sample_code).unwrap();
+
+    let temp_db = temp_root.join(".codeatlas").join("index.db");
+    let mut engine = Engine::open(&temp_root, &temp_db).unwrap();
+
+    // Cold index with fast mode
+    let report1 = engine.index_with_options(false, true).unwrap();
+    assert_eq!(report1.files_indexed, 1);
+    assert!(report1.symbols_count >= 1);
+
+    // Incremental index with fast mode (should skip because mtime & size match)
+    let report2 = engine.index_with_options(false, true).unwrap();
+    assert_eq!(report2.files_indexed, 0);
+
+    // Fast search
+    let results = engine.search_with_options("fast_mode_demo", 5, false, true).unwrap();
+    assert!(!results.is_empty());
+
+    let _ = std::fs::remove_dir_all(&temp_root);
+}
