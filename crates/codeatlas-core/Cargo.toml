@@ -1,0 +1,21 @@
+[package]
+name = "codeatlas-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+rusqlite.workspace = true
+petgraph.workspace = true
+rayon.workspace = true
+ignore.workspace = true
+tree-sitter.workspace = true
+tree-sitter-python.workspace = true
+sha2.workspace = true
+regex.workspace = true
