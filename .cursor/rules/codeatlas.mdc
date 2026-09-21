@@ -1,0 +1,28 @@
+---
+description: CodeAtlas code intelligence and change blast-radius rules for Cursor Agent
+globs: *
+alwaysApply: true
+---
+
+# CodeAtlas Cursor Agent Rules
+
+When searching code, locating definitions, or planning refactors in this workspace, leverage the `codeatlas` CLI:
+
+1. **Locate Symbols & Definitions First**:
+   - Run `codeatlas search "<query>"` instead of searching line-by-line with `grep`.
+   - Use `codeatlas search "<query>" --expand-graph` to retrieve 1-hop callers, callees, and imports attached to the result.
+   - Use `codeatlas search "<query>" --json` when structured data is needed.
+
+2. **Always Check Blast Radius Before Refactoring**:
+   - Before renaming, modifying arguments of, or deleting any function, class, or method, run:
+     ```bash
+     codeatlas impact "<symbol_name>"
+     ```
+   - This performs reverse BFS across the repository call graph and reveals all dependent callers that would break.
+
+3. **Ensure Codebase Index is Initialized**:
+   - Run `codeatlas index .` (takes ~100ms cold, ~6ms incremental).
+   - If files were changed outside git, run `codeatlas index . --full`.
+
+4. **Generate Architecture Diagrams**:
+   - Run `codeatlas wiki .codeatlas/wiki` to synthesize Mermaid dependency graphs and workflow sequence diagrams in markdown.
