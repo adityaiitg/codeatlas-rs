@@ -9,4 +9,9 @@ Core code intelligence, multi-threaded tree-sitter AST parsing, SQLite FTS5 BM25
 - Multi-signal hybrid retriever (exact symbol match, file stem relevance, noise penalties, coherence boost).
 - Living architecture wiki and Mermaid diagram generator.
 
+## Installation
+```bash
+cargo add codeatlas-core
+```
+
 See [CodeAtlas Repository](https://github.com/adityaiitg/codeatlas-rs) for full documentation.
