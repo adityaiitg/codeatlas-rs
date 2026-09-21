@@ -2,6 +2,8 @@
 
 **Ultra-fast code intelligence and knowledge graph engine written in Rust.**
 
+[![Crates.io: codeatlas](https://img.shields.io/crates/v/codeatlas.svg?label=crates.io%20(CLI))](https://crates.io/crates/codeatlas)
+[![Crates.io: codeatlas-mcp](https://img.shields.io/crates/v/codeatlas-mcp.svg?label=crates.io%20(MCP))](https://crates.io/crates/codeatlas-mcp)
 [![Release: v0.1.0](https://img.shields.io/badge/release-v0.1.0-blue.svg)](https://github.com/adityaiitg/codeatlas-rs/releases/tag/v0.1.0)
 [![CI Status](https://github.com/adityaiitg/codeatlas-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/adityaiitg/codeatlas-rs/actions)
 [![Build & Tests](https://img.shields.io/badge/tests-7%20passed-brightgreen.svg)]()
@@ -62,9 +64,13 @@ rm -rf codeatlas-linux-x86_64*
 ---
 
 ## 🛠️ Build & Install with Cargo
-
+ 
 ```bash
-# Install directly from GitHub repository
+# Install directly from crates.io
+cargo install codeatlas
+cargo install codeatlas-mcp
+
+# Or install from GitHub repository
 cargo install --git https://github.com/adityaiitg/codeatlas-rs.git codeatlas
 cargo install --git https://github.com/adityaiitg/codeatlas-rs.git codeatlas-mcp
 
