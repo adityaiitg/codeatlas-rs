@@ -12,7 +12,8 @@
 [![Binary Size](https://img.shields.io/badge/binary-6.1MB%20standalone-blueviolet.svg)]()
 [![Python Version](https://img.shields.io/badge/Python%20Version-codeatlas-yellow.svg)](https://github.com/adityaiitg/codeatlas)
 
-> 🐍 **Python Ecosystem:** Looking for the Python library with SentenceTransformers / ONNX support? See [CodeAtlas (Python)](https://github.com/adityaiitg/codeatlas).
+> 🐍 **Python Ecosystem:** Looking for the Python library with SentenceTransformers / ONNX support? See [CodeAtlas (Python)](https://github.com/adityaiitg/codeatlas).  
+> 📖 **Comprehensive Documentation:** For in-depth CLI workflows, MCP setup, API examples, and CI/CD guides, see the [Full Usage Guide](docs/USAGE.md).
 
 ---
 
