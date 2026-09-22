@@ -17,13 +17,20 @@ pub struct ScannedFile {
 
 pub struct FileScanner {
     root: PathBuf,
+    canonical_root: PathBuf,
     ignore_patterns: Vec<String>,
 }
 
 impl FileScanner {
     pub fn new<P: AsRef<Path>>(root: P) -> Self {
+        let root = root.as_ref().to_path_buf();
+        // Canonicalize now so the symlink check compares apples-to-apples.
+        // On macOS /tmp is a symlink to /private/tmp, so without this the
+        // confinement check would always reject files under /tmp.
+        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.clone());
         Self {
-            root: root.as_ref().to_path_buf(),
+            root,
+            canonical_root,
             ignore_patterns: vec![
                 "target".to_string(),
                 "node_modules".to_string(),
@@ -76,6 +83,13 @@ impl FileScanner {
             }
 
             if let Some(lang) = detect_language(path) {
+                // Symlink confinement: skip any file whose canonical path escapes root
+                if let Ok(real) = path.canonicalize() {
+                    if !real.starts_with(&self.canonical_root) {
+                        continue;
+                    }
+                }
+
                 let metadata = entry.metadata().ok();
                 let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
                 let mtime = metadata

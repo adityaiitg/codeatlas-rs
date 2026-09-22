@@ -68,6 +68,15 @@ CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_path);
 CREATE INDEX IF NOT EXISTS idx_chunks_symbol ON chunks(symbol_id);
+
+CREATE TABLE IF NOT EXISTS chunk_embeddings (
+    chunk_id          TEXT PRIMARY KEY,
+    embedding         BLOB NOT NULL,
+    dimensions        INTEGER NOT NULL,
+    FOREIGN KEY(chunk_id) REFERENCES chunks(chunk_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_id ON chunk_embeddings(chunk_id);
 "#;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -96,7 +105,8 @@ impl Database {
         let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0)).unwrap_or_default();
         let _ = conn.execute("PRAGMA synchronous = NORMAL", []);
         let _ = conn.execute("PRAGMA foreign_keys = ON", []);
-        let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
+        let _ = conn.execute("PRAGMA cache_size = -64000", []); // 64 MB page cache
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(30000));
 
         conn.execute_batch(SCHEMA_SQL)?;
 
@@ -317,6 +327,10 @@ impl Database {
 
     pub fn remove_file(&mut self, file_path: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM chunk_embeddings WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE file_path = ?1)",
+            params![file_path],
+        )?;
         tx.execute("DELETE FROM symbols WHERE file_path = ?1", params![file_path])?;
         tx.execute("DELETE FROM chunks WHERE file_path = ?1", params![file_path])?;
         tx.execute("DELETE FROM chunks_fts WHERE file_path = ?1", params![file_path])?;
@@ -330,12 +344,14 @@ impl Database {
         let symbols: i64 = self.conn.query_row("SELECT count(*) FROM symbols", [], |r| r.get(0)).unwrap_or(0);
         let edges: i64 = self.conn.query_row("SELECT count(*) FROM edges", [], |r| r.get(0)).unwrap_or(0);
         let chunks: i64 = self.conn.query_row("SELECT count(*) FROM chunks", [], |r| r.get(0)).unwrap_or(0);
+        let embeddings: i64 = self.conn.query_row("SELECT count(*) FROM chunk_embeddings", [], |r| r.get(0)).unwrap_or(0);
 
         Ok(serde_json::json!({
             "files": files,
             "symbols": symbols,
             "edges": edges,
             "chunks": chunks,
+            "embeddings": embeddings,
         }))
     }
 
@@ -417,6 +433,50 @@ impl Database {
             list.push(r?);
         }
         Ok(list)
+    }
+
+    pub fn insert_embeddings(&mut self, embeddings: &[(String, Vec<f32>)]) -> Result<()> {
+        if embeddings.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO chunk_embeddings (chunk_id, embedding, dimensions)
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for (chunk_id, emb) in embeddings {
+                let bytes = crate::embedder::embedding_to_bytes(emb);
+                stmt.execute(params![chunk_id, bytes, emb.len() as i64])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn load_all_embeddings(&self) -> Result<Vec<(String, Vec<f32>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT chunk_id, embedding FROM chunk_embeddings",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let cid: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            let vec = crate::embedder::bytes_to_embedding(&blob);
+            Ok((cid, vec))
+        })?;
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    pub fn get_embedding_count(&self) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT count(*) FROM chunk_embeddings", [], |r| r.get(0))
+            .unwrap_or(0);
+        Ok(count as usize)
     }
 }
 

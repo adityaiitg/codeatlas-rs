@@ -127,7 +127,7 @@ impl<'a> WikiGenerator<'a> {
 
         let diagram = if !dep_edges.is_empty() {
             for node in module_nodes.iter().take(25) {
-                let clean_name = node.split('_').last().unwrap_or(node);
+                let clean_name = node.split('_').next_back().unwrap_or(node);
                 mermaid.push_str(&format!("    {}[\"{}\"]\n", node, clean_name));
             }
             for (s, t) in dep_edges.iter().take(35) {
@@ -249,11 +249,11 @@ impl<'a> WikiGenerator<'a> {
             content.push_str("\n_No multi-step call sequences detected in current graph._\n");
         } else {
             for (src, tgts) in calls_map.iter().take(20) {
-                let src_name = src.split(':').last().unwrap_or(src);
+                let src_name = src.split(':').next_back().unwrap_or(src);
                 content.push_str(&format!("### Flow from `{}`\n```mermaid\nsequenceDiagram\n", src_name));
-                let clean_src = src_name.replace('.', "_").replace('-', "_");
+                let clean_src = src_name.replace(['.', '-'], "_");
                 for tgt in tgts {
-                    let tgt_name = tgt.strip_prefix("call:").unwrap_or(tgt).replace('.', "_").replace('-', "_");
+                    let tgt_name = tgt.strip_prefix("call:").unwrap_or(tgt).replace(['.', '-'], "_");
                     content.push_str(&format!("    {}->>{}: invoke\n", clean_src, tgt_name));
                 }
                 content.push_str("```\n\n");
@@ -274,7 +274,7 @@ impl<'a> WikiGenerator<'a> {
             "# CodeAtlas Living Wiki\n\nWelcome to the automated architectural wiki synthesized directly from source code ASTs and dependency graphs.\n\n## Core Sections\n- [System Architecture](./architecture.md) — High-level module dependency diagrams and structure\n- [Workflows & Execution](./workflows.md) — Call traces and interaction sequence diagrams\n\n## Indexed Modules\n",
         );
 
-        for (fpath, _) in files_map {
+        for fpath in files_map.keys() {
             let stem = Path::new(fpath).file_stem().and_then(|s| s.to_str()).unwrap_or("mod");
             let file_name = Path::new(fpath).file_name().and_then(|s| s.to_str()).unwrap_or(fpath);
             content.push_str(&format!("- [`{}`](./modules/{}.md)\n", file_name, stem));

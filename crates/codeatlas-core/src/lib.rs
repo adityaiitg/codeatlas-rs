@@ -1,3 +1,4 @@
+pub mod embedder;
 pub mod graph;
 pub mod models;
 pub mod parser;
@@ -7,11 +8,13 @@ pub mod storage;
 pub mod wiki;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::embedder::CodeEmbedder;
 use crate::graph::CodeGraph;
 use crate::models::{SearchResult, Symbol};
 use crate::parser::AstParser;
@@ -35,6 +38,7 @@ pub struct Engine {
     pub db_path: PathBuf,
     pub db: Database,
     pub graph: CodeGraph,
+    pub embedder: Arc<CodeEmbedder>,
 }
 
 impl Engine {
@@ -57,11 +61,14 @@ impl Engine {
             }
         }
 
+        let embedder = Arc::new(CodeEmbedder::new());
+
         Ok(Self {
             root_path,
             db_path,
             db,
             graph,
+            embedder,
         })
     }
 
@@ -129,11 +136,19 @@ impl Engine {
         let mut total_syms = 0;
         let mut total_chunks = 0;
         let mut total_edges = 0;
+        let mut chunks_to_embed: Vec<(String, String)> = Vec::new();
 
         for (file, syms, chunks, edges) in parsed_files {
             total_syms += syms.len();
             total_chunks += chunks.len();
             total_edges += edges.len();
+
+            if !fast {
+                for c in &chunks {
+                    let text = format!("{}: {}", c.file_path, c.content);
+                    chunks_to_embed.push((c.chunk_id.clone(), text));
+                }
+            }
 
             // Insert into SQLite database
             self.db.insert_symbols(&syms)?;
@@ -156,6 +171,35 @@ impl Engine {
                 &file.language,
             )?;
         }
+
+        // Post-indexing graph linking: resolve call:/symbol: placeholder edges
+        // to canonical node IDs, fixing the 0-callers bug in impact analysis.
+        if files_indexed > 0 {
+            self.graph.link();
+
+            // Semantic vector embeddings for newly indexed chunks (skipped in fast mode)
+            if !fast && !chunks_to_embed.is_empty() {
+                for chunk_batch in chunks_to_embed.chunks(64) {
+                    let texts: Vec<&str> = chunk_batch.iter().map(|(_, t)| t.as_str()).collect();
+                    match self.embedder.embed(&texts) {
+                            Ok(vectors) => {
+                                let pairs: Vec<(String, Vec<f32>)> = chunk_batch
+                                    .iter()
+                                    .zip(vectors)
+                                    .map(|((cid, _), vec)| (cid.clone(), vec))
+                                    .collect();
+                                if let Err(e) = self.db.insert_embeddings(&pairs) {
+                                    tracing::warn!("Failed to store chunk embeddings: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Semantic embedding skipped: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
 
         if fast {
             let _ = self.db.set_fast_mode(false);
@@ -184,7 +228,7 @@ impl Engine {
         expand_graph: bool,
         fast: bool,
     ) -> Result<Vec<SearchResult>> {
-        let retriever = Retriever::new(self.db.conn(), &self.graph);
+        let retriever = Retriever::with_embedder(self.db.conn(), &self.graph, &self.embedder);
         retriever.search_with_options(query, limit, expand_graph, fast)
     }
 

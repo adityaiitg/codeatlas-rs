@@ -46,7 +46,28 @@ pub fn configure_agent(agent: &str, remove: bool) -> Result<Vec<InstallResult>> 
 
         let mut data: Value = if config_file.exists() {
             let content = fs::read_to_string(&config_file).unwrap_or_default();
-            serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
+            // Strip JSONC-style line/block comments before parsing (Cursor & VS Code use JSONC)
+            let stripped = strip_jsonc_comments(&content);
+            // Create .bak backup before mutating any existing config
+            let bak_path = config_file.with_extension("json.bak");
+            let _ = fs::copy(&config_file, &bak_path);
+            match serde_json::from_str(&stripped) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "{} Could not parse {} ({}). Skipping to avoid corruption.",
+                        "Warning:".yellow().bold(),
+                        config_file.display(),
+                        e
+                    );
+                    results.push(InstallResult {
+                        agent: agent.to_string(),
+                        config_path: config_file,
+                        action: "skipped".to_string(),
+                    });
+                    continue;
+                }
+            }
         } else {
             json!({})
         };
@@ -146,7 +167,64 @@ pub fn print_install_results(results: &[InstallResult]) {
                     r.config_path.display().to_string().dimmed()
                 );
             }
+            "skipped" => {
+                eprintln!(
+                    "{} Skipped {} (config parse failed — check backup .json.bak)",
+                    "!".red().bold(),
+                    r.config_path.display()
+                );
+            }
             _ => {}
         }
     }
+}
+
+/// Strip line comments (`// ...`) and block comments (`/* ... */`) from a JSON string.
+/// This enables safe parsing of JSONC files used by Cursor, VS Code, and similar editors.
+pub fn strip_jsonc_comments(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    let mut in_string = false;
+    let mut prev_char = '\0';
+
+    while let Some(c) = chars.next() {
+        if in_string {
+            if c == '"' && prev_char != '\\' {
+                in_string = false;
+            }
+            result.push(c);
+            prev_char = c;
+        } else if c == '"' {
+            in_string = true;
+            result.push(c);
+            prev_char = c;
+        } else if c == '/' && chars.peek() == Some(&'/') {
+            // Line comment: skip until newline
+            for cc in chars.by_ref() {
+                if cc == '\n' {
+                    result.push('\n');
+                    break;
+                }
+            }
+            prev_char = '\n';
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            // Block comment: skip until */
+            chars.next(); // consume '*'
+            let mut last = '\0';
+            for cc in chars.by_ref() {
+                if last == '*' && cc == '/' {
+                    break;
+                }
+                if cc == '\n' {
+                    result.push('\n');
+                }
+                last = cc;
+            }
+            prev_char = ' ';
+        } else {
+            result.push(c);
+            prev_char = c;
+        }
+    }
+    result
 }

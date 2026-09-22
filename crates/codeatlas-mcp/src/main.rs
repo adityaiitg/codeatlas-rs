@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use codeatlas_core::Engine;
 
 const SERVER_NAME: &str = "codeatlas";
-const SERVER_VERSION: &str = "0.1.0";
+const SERVER_VERSION: &str = "0.2.0";
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
 fn get_tools_def() -> Value {
@@ -114,6 +114,19 @@ fn send_error(id: &Value, code: i64, message: &str) {
 }
 
 fn main() -> Result<()> {
+    // MCP stdio protection: redirect ALL logging to stderr.
+    // The MCP protocol owns stdout exclusively for JSON-RPC messages.
+    // Any tracing/log output to stdout would corrupt the protocol stream.
+    use tracing_subscriber::fmt;
+    fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "warn".to_string())
+                .as_str(),
+        )
+        .init();
+
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let db_path = current_dir.join(".codeatlas").join("index.db");
 

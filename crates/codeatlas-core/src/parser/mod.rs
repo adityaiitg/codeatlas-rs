@@ -1,4 +1,6 @@
 use std::path::Path;
+use std::sync::OnceLock;
+use regex::Regex;
 use sha2::{Digest, Sha256};
 use tree_sitter::{Node, Parser};
 
@@ -19,8 +21,8 @@ pub fn split_identifier(ident: &str) -> Vec<String> {
         } else if c.is_uppercase() {
             if !current.is_empty() {
                 // If previous was lowercase or next is lowercase, start a new word
-                let prev_lower = chars.get(i.saturating_sub(1)).map_or(false, |p| p.is_lowercase());
-                let next_lower = chars.get(i + 1).map_or(false, |n| n.is_lowercase());
+                let prev_lower = chars.get(i.saturating_sub(1)).is_some_and(|p| p.is_lowercase());
+                let next_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
                 if prev_lower || next_lower {
                     words.push(current.to_lowercase());
                     current.clear();
@@ -142,6 +144,7 @@ impl AstParser {
         (symbols, chunks, edges)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn extract_class(
         &self,
         node: &Node,
@@ -250,6 +253,7 @@ impl AstParser {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn extract_function(
         &self,
         node: &Node,
@@ -373,18 +377,38 @@ impl AstParser {
     }
 
     fn parse_generic(&self, file_path: &Path, content: &str, language: &str) -> (Vec<Symbol>, Vec<CodeChunk>, Vec<Edge>) {
+        static GENERIC_CLASS_RE: OnceLock<Regex> = OnceLock::new();
+        static GENERIC_FUNC_RE: OnceLock<Regex> = OnceLock::new();
+        static GENERIC_ARROW_RE: OnceLock<Regex> = OnceLock::new();
+        static GENERIC_IMPORT_RE: OnceLock<Regex> = OnceLock::new();
+
+        let class_re = GENERIC_CLASS_RE.get_or_init(|| {
+            Regex::new(r"^\s*(?:export\s+)?(?:default\s+)?(?:pub(?:\([^)]*\))?\s+)?(?:class|interface|struct|enum|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)").unwrap()
+        });
+        let func_re = GENERIC_FUNC_RE.get_or_init(|| {
+            Regex::new(r"^\s*(?:export\s+)?(?:default\s+)?(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:fn|func|function)\s+([A-Za-z_][A-Za-z0-9_]*)").unwrap()
+        });
+        let arrow_re = GENERIC_ARROW_RE.get_or_init(|| {
+            Regex::new(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)\s*=>").unwrap()
+        });
+        let import_re = GENERIC_IMPORT_RE.get_or_init(|| {
+            Regex::new(r#"(?:import\s+(?:\{[^}]*\}|\*\s+as\s+[A-Za-z0-9_]+|[A-Za-z0-9_]+)\s+from\s+['"]([^'"]+)['"]|use\s+([A-Za-z0-9_:]+);|import\s+['"]([^'"]+)['"])"#).unwrap()
+        });
+
         let mut symbols = Vec::new();
         let mut chunks = Vec::new();
-        let edges = Vec::new();
+        let mut edges = Vec::new();
 
         let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
         let hash = format!("{:x}", hasher.finalize());
 
         let lines: Vec<&str> = content.lines().collect();
+        let total_lines = lines.len().max(1);
         let file_stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
         let module_id = format!("file:{}", file_path.display());
 
+        // 1. Module-level Symbol
         symbols.push(Symbol {
             node_id: module_id.clone(),
             file_path: file_path.to_string_lossy().to_string(),
@@ -394,7 +418,7 @@ impl AstParser {
             signature: None,
             docstring: None,
             start_line: 1,
-            end_line: lines.len().max(1),
+            end_line: total_lines,
             source_code: content.to_string(),
             content_hash: hash.clone(),
             language: language.to_string(),
@@ -402,20 +426,181 @@ impl AstParser {
             referenced_types: Vec::new(),
         });
 
+        // 2. Overview Chunk (up to first 40 lines)
+        let overview_end = total_lines.min(40);
+        let overview_content = lines[0..overview_end].join("\n");
+        let mut overview_hasher = Sha256::new();
+        overview_hasher.update(overview_content.as_bytes());
+        let overview_hash = format!("{:x}", overview_hasher.finalize());
+
         chunks.push(CodeChunk {
             chunk_id: format!("chunk:{}", module_id),
-            symbol_id: Some(module_id),
+            symbol_id: Some(module_id.clone()),
             file_path: file_path.to_string_lossy().to_string(),
-            chunk_type: ChunkType::Code,
-            content: content.to_string(),
+            chunk_type: if file_path.to_string_lossy().to_lowercase().contains("test") {
+                ChunkType::Test
+            } else {
+                ChunkType::Code
+            },
+            content: overview_content,
             start_line: 1,
-            end_line: lines.len().max(1),
+            end_line: overview_end,
             language: language.to_string(),
-            content_hash: hash,
+            content_hash: overview_hash,
             is_definition: false,
             identifiers: vec![file_stem.to_string()],
             identifier_tokens: split_identifier(file_stem),
         });
+
+        // 3. Scan line-by-line for classes/structs/traits, functions, and imports
+        for (idx, line) in lines.iter().enumerate() {
+            let line_num = idx + 1;
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+                continue;
+            }
+
+            // Match class / struct / enum / trait / interface / type
+            if let Some(caps) = class_re.captures(line) {
+                if let Some(name_match) = caps.get(1) {
+                    let name = name_match.as_str();
+                    let kind = if trimmed.contains("interface") {
+                        SymbolKind::Interface
+                    } else if trimmed.contains("type ") {
+                        SymbolKind::Type
+                    } else {
+                        SymbolKind::Class
+                    };
+
+                    let chunk_end = (line_num + 39).min(total_lines);
+                    let chunk_content = lines[idx..chunk_end].join("\n");
+                    let mut chunk_hasher = Sha256::new();
+                    chunk_hasher.update(chunk_content.as_bytes());
+                    let chunk_hash = format!("{:x}", chunk_hasher.finalize());
+
+                    let node_id = format!("{}:{}", file_path.display(), name);
+
+                    symbols.push(Symbol {
+                        node_id: node_id.clone(),
+                        file_path: file_path.to_string_lossy().to_string(),
+                        kind,
+                        name: name.to_string(),
+                        parent_symbol: Some(module_id.clone()),
+                        signature: Some(trimmed.to_string()),
+                        docstring: None,
+                        start_line: line_num,
+                        end_line: chunk_end,
+                        source_code: chunk_content.clone(),
+                        content_hash: chunk_hash.clone(),
+                        language: language.to_string(),
+                        calls: Vec::new(),
+                        referenced_types: Vec::new(),
+                    });
+
+                    chunks.push(CodeChunk {
+                        chunk_id: format!("chunk:{}", node_id),
+                        symbol_id: Some(node_id.clone()),
+                        file_path: file_path.to_string_lossy().to_string(),
+                        chunk_type: if file_path.to_string_lossy().to_lowercase().contains("test") {
+                            ChunkType::Test
+                        } else {
+                            ChunkType::Code
+                        },
+                        content: chunk_content,
+                        start_line: line_num,
+                        end_line: chunk_end,
+                        language: language.to_string(),
+                        content_hash: chunk_hash,
+                        is_definition: true,
+                        identifiers: vec![name.to_string()],
+                        identifier_tokens: split_identifier(name),
+                    });
+
+                    edges.push(Edge {
+                        source_id: module_id.clone(),
+                        target_id: node_id,
+                        edge_type: EdgeType::Defines,
+                        metadata: None,
+                    });
+                    continue;
+                }
+            }
+
+            // Match function / method / arrow function
+            let func_match = func_re.captures(line).or_else(|| arrow_re.captures(line));
+            if let Some(caps) = func_match {
+                if let Some(name_match) = caps.get(1) {
+                    let name = name_match.as_str();
+                    let chunk_end = (line_num + 39).min(total_lines);
+                    let chunk_content = lines[idx..chunk_end].join("\n");
+                    let mut chunk_hasher = Sha256::new();
+                    chunk_hasher.update(chunk_content.as_bytes());
+                    let chunk_hash = format!("{:x}", chunk_hasher.finalize());
+
+                    let node_id = format!("{}:{}", file_path.display(), name);
+
+                    symbols.push(Symbol {
+                        node_id: node_id.clone(),
+                        file_path: file_path.to_string_lossy().to_string(),
+                        kind: SymbolKind::Function,
+                        name: name.to_string(),
+                        parent_symbol: Some(module_id.clone()),
+                        signature: Some(trimmed.to_string()),
+                        docstring: None,
+                        start_line: line_num,
+                        end_line: chunk_end,
+                        source_code: chunk_content.clone(),
+                        content_hash: chunk_hash.clone(),
+                        language: language.to_string(),
+                        calls: Vec::new(),
+                        referenced_types: Vec::new(),
+                    });
+
+                    chunks.push(CodeChunk {
+                        chunk_id: format!("chunk:{}", node_id),
+                        symbol_id: Some(node_id.clone()),
+                        file_path: file_path.to_string_lossy().to_string(),
+                        chunk_type: if file_path.to_string_lossy().to_lowercase().contains("test") {
+                            ChunkType::Test
+                        } else {
+                            ChunkType::Code
+                        },
+                        content: chunk_content,
+                        start_line: line_num,
+                        end_line: chunk_end,
+                        language: language.to_string(),
+                        content_hash: chunk_hash,
+                        is_definition: true,
+                        identifiers: vec![name.to_string()],
+                        identifier_tokens: split_identifier(name),
+                    });
+
+                    edges.push(Edge {
+                        source_id: module_id.clone(),
+                        target_id: node_id,
+                        edge_type: EdgeType::Defines,
+                        metadata: None,
+                    });
+                    continue;
+                }
+            }
+
+            // Match import / use
+            if let Some(caps) = import_re.captures(line) {
+                let target = caps.get(1)
+                    .or_else(|| caps.get(2))
+                    .or_else(|| caps.get(3))
+                    .map(|m| m.as_str());
+                if let Some(tgt) = target {
+                    edges.push(Edge {
+                        source_id: module_id.clone(),
+                        target_id: format!("symbol:{}", tgt),
+                        edge_type: EdgeType::Imports,
+                        metadata: None,
+                    });
+                }
+            }
+        }
 
         (symbols, chunks, edges)
     }

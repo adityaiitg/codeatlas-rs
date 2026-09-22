@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 
 mod installer;
+mod hooks;
 
 use codeatlas_core::Engine;
 
@@ -35,6 +36,10 @@ enum Commands {
         #[arg(short = 'f', long)]
         fast: bool,
 
+        /// Skip generating semantic vector embeddings
+        #[arg(long)]
+        no_embeddings: bool,
+
         /// Custom path to the SQLite index database
         #[arg(long)]
         db: Option<PathBuf>,
@@ -56,6 +61,10 @@ enum Commands {
         /// Fast search mode: direct sub-millisecond lexical scoring without graph expansion
         #[arg(long)]
         fast: bool,
+
+        /// Disable semantic search (lexical BM25 only)
+        #[arg(long)]
+        no_semantic: bool,
 
         /// Output results as JSON
         #[arg(long)]
@@ -91,6 +100,21 @@ enum Commands {
         db: Option<PathBuf>,
     },
 
+    /// Watch repository for file modifications and incrementally re-index
+    Watch {
+        /// Root path of the codebase to watch
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Polling interval in seconds
+        #[arg(short = 'i', long, default_value = "3")]
+        interval: u64,
+
+        /// Custom path to the SQLite index database
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+
     /// Inspect or export the knowledge graph
     Graph {
         #[command(subcommand)]
@@ -110,12 +134,42 @@ enum Commands {
         #[arg(default_value = "all")]
         agent: String,
     },
+
+    /// Manage Git hooks for automatic background indexing
+    Hook {
+        #[command(subcommand)]
+        sub: HookSubcommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum HookSubcommands {
+    /// Install post-commit, post-checkout, and post-merge git hooks
+    Install {
+        /// Repository path
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Remove CodeAtlas git hooks
+    Uninstall {
+        /// Repository path
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
 enum GraphSubcommands {
     /// Display graph and index statistics
     Stats {
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    /// Inspect symbol details and its 1-hop callers and callees
+    Symbol {
+        /// Symbol name or ID
+        name: String,
+
         #[arg(long)]
         db: Option<PathBuf>,
     },
@@ -146,17 +200,23 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Index { path, full, fast, db } => {
+        Commands::Index { path, full, fast, no_embeddings, db } => {
             let root = std::fs::canonicalize(&path).unwrap_or(path);
             let db_path = resolve_db_path(&root, db);
 
-            let mode_str = if fast { " [Fast Mode]".yellow().to_string() } else { "".to_string() };
+            let mode_str = if fast {
+                " [Fast Mode]".yellow().to_string()
+            } else if no_embeddings {
+                " [No Embeddings]".dimmed().to_string()
+            } else {
+                " [Hybrid Semantic]".magenta().to_string()
+            };
             println!("⚡ {}{}", "CodeAtlas (Rust)".bold().cyan(), mode_str);
             println!("  Indexing directory: {}", root.display().to_string().yellow());
             println!("  Database target:    {}", db_path.display().to_string().dimmed());
 
             let mut engine = Engine::open(&root, &db_path)?;
-            let report = engine.index_with_options(full, fast)?;
+            let report = engine.index_with_options(full, fast || no_embeddings)?;
 
             println!("\n{}", "✓ Indexing Complete".bold().green());
             println!("  Files scanned:   {}", report.files_scanned.to_string().bold());
@@ -164,6 +224,10 @@ fn main() -> Result<()> {
             println!("  Symbols parsed:  {}", report.symbols_count.to_string().bold());
             println!("  Chunks indexed:  {}", report.chunks_count.to_string().bold());
             println!("  Graph edges:     {}", report.edges_count.to_string().bold());
+            let emb_count = engine.db.get_embedding_count().unwrap_or(0);
+            if emb_count > 0 {
+                println!("  Vectors embedded:{}", emb_count.to_string().bold().magenta());
+            }
             println!("  Total latency:   {} ms", report.duration_ms.to_string().cyan().bold());
         }
 
@@ -172,6 +236,7 @@ fn main() -> Result<()> {
             limit,
             expand_graph,
             fast,
+            no_semantic,
             json,
             db,
         } => {
@@ -188,7 +253,7 @@ fn main() -> Result<()> {
             }
 
             let engine = Engine::open(&root, &db_path)?;
-            let results = engine.search_with_options(&query, limit, expand_graph, fast)?;
+            let results = engine.search_with_options(&query, limit, expand_graph, fast || no_semantic)?;
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&results)?);
@@ -209,14 +274,21 @@ fn main() -> Result<()> {
                 } else {
                     "".normal()
                 };
+                let rank_info = match (r.lexical_rank, r.semantic_rank) {
+                    (Some(l), Some(s)) => format!(" [lex:#{} sem:#{}]", l, s).magenta(),
+                    (Some(l), None) => format!(" [lex:#{}]", l).dimmed(),
+                    (None, Some(s)) => format!(" [sem:#{}]", s).magenta(),
+                    (None, None) => "".normal(),
+                };
 
                 println!(
-                    "{}. {} {}:{} (score: {:.4}) {}",
+                    "{}. {} {}:{} (score: {:.4}){} {}",
                     (idx + 1).to_string().bold(),
                     r.file_path.bold().blue(),
                     r.start_line,
                     r.end_line,
                     r.score,
+                    rank_info,
                     def_badge
                 );
                 println!("   Symbol: {}", sym_str.dimmed());
@@ -297,6 +369,48 @@ fn main() -> Result<()> {
             }
         }
 
+        Commands::Watch { path, interval, db } => {
+            let root = std::fs::canonicalize(&path).unwrap_or(path);
+            let db_path = resolve_db_path(&root, db);
+
+            println!("⚡ {} [Watch Mode]", "CodeAtlas (Rust)".bold().cyan());
+            println!("  Watching directory: {}", root.display().to_string().yellow());
+            println!("  Polling interval:   {}s (Press Ctrl+C to stop)\n", interval);
+
+            let mut engine = Engine::open(&root, &db_path)?;
+            let initial_report = engine.index_with_options(false, true)?;
+            let now = chrono_now_time();
+            println!(
+                "  [{}] Initial index: {} files indexed, {} symbols, {} ms",
+                now.dimmed(),
+                initial_report.files_indexed,
+                initial_report.symbols_count,
+                initial_report.duration_ms
+            );
+
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(interval));
+                match engine.index_with_options(false, true) {
+                    Ok(report) => {
+                        if report.files_indexed > 0 {
+                            let now = chrono_now_time();
+                            println!(
+                                "  [{}] {} Re-indexed {} file(s) in {} ms (total {} symbols)",
+                                now.dimmed(),
+                                "✓".green().bold(),
+                                report.files_indexed,
+                                report.duration_ms,
+                                report.symbols_count
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  {} Index error: {}", "Warning:".yellow().bold(), e);
+                    }
+                }
+            }
+        }
+
         Commands::Graph { sub } => match sub {
             GraphSubcommands::Stats { db } => {
                 let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -312,6 +426,50 @@ fn main() -> Result<()> {
                 println!("{}", "CodeAtlas Knowledge Graph Stats:".bold().cyan());
                 println!("{}", serde_json::to_string_pretty(&stats)?);
             }
+            GraphSubcommands::Symbol { name, db } => {
+                let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let db_path = resolve_db_path(&root, db);
+
+                if !db_path.exists() {
+                    eprintln!("{} Index database not found at {}.", "Error:".bold().red(), db_path.display());
+                    std::process::exit(1);
+                }
+
+                let engine = Engine::open(&root, &db_path)?;
+                let symbols = engine.get_symbols()?;
+                let matches: Vec<_> = symbols
+                    .iter()
+                    .filter(|s| s.name == name || s.node_id.ends_with(&format!(":{}", name)) || s.node_id.contains(&name))
+                    .collect();
+
+                if matches.is_empty() {
+                    println!("{} No symbol found matching '{}'.", "Notice:".yellow(), name);
+                } else {
+                    println!("{} for '{}' ({} matches):\n", "Symbol Inspection".bold().cyan(), name.yellow(), matches.len());
+                    for s in matches {
+                        println!("• {} ({})", s.name.bold(), s.kind.as_str().cyan());
+                        println!("  Node ID:    {}", s.node_id.dimmed());
+                        println!("  File:       {}:{}-{}", s.file_path.blue(), s.start_line, s.end_line);
+                        if let Some(ref sig) = s.signature {
+                            println!("  Signature:  {}", sig.dimmed());
+                        }
+                        if let Some(ref doc) = s.docstring {
+                            println!("  Docstring:  {}", doc.lines().next().unwrap_or("").dimmed());
+                        }
+                        let neighbors = engine.graph.expand_neighborhood(std::slice::from_ref(&s.node_id), 1);
+                        let clean: Vec<_> = neighbors.iter().filter(|&n| n != &s.node_id).take(6).collect();
+                        if !clean.is_empty() {
+                            println!("  1-Hop Neighbors: {}", clean.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", ").magenta());
+                        }
+                        let callers = engine.impact(&s.node_id);
+                        if !callers.is_empty() {
+                            println!("  Incoming Callers/Dependents ({}): {}", callers.len(), callers.iter().take(5).cloned().collect::<Vec<_>>().join(", ").red());
+                        }
+                        println!();
+                    }
+                }
+            }
+
             GraphSubcommands::Export { format, output, db } => {
                 let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 let db_path = resolve_db_path(&root, db);
@@ -363,7 +521,50 @@ fn main() -> Result<()> {
                 installer::print_install_results(&res);
             }
         }
+
+        Commands::Hook { sub } => match sub {
+            HookSubcommands::Install { path } => {
+                let root = std::fs::canonicalize(&path).unwrap_or(path);
+                match hooks::install_git_hooks(&root) {
+                    Ok(installed) => {
+                        println!("{} Installed CodeAtlas git hooks: {}", "✓".green().bold(), installed.join(", ").cyan());
+                        println!("  CodeAtlas will now automatically re-index incrementally in the background on git commits and checkouts.");
+                    }
+                    Err(e) => {
+                        eprintln!("{} Failed to install git hooks: {}", "Error:".red().bold(), e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            HookSubcommands::Uninstall { path } => {
+                let root = std::fs::canonicalize(&path).unwrap_or(path);
+                match hooks::uninstall_git_hooks(&root) {
+                    Ok(uninstalled) => {
+                        if uninstalled.is_empty() {
+                            println!("No CodeAtlas git hooks were found in repository.");
+                        } else {
+                            println!("{} Removed CodeAtlas git hooks: {}", "✓".yellow().bold(), uninstalled.join(", ").yellow());
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("{} Failed to remove git hooks: {}", "Error:".red().bold(), e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        },
     }
 
     Ok(())
 }
+
+fn chrono_now_time() -> String {
+    let now = std::time::SystemTime::now();
+    let d = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = d.as_secs();
+    let hours = (secs / 3600) % 24;
+    let mins = (secs / 60) % 60;
+    let s = secs % 60;
+    format!("{:02}:{:02}:{:02}", hours, mins, s)
+}
+

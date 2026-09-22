@@ -111,8 +111,11 @@ codeatlas --help
 Indexes a codebase into SQLite (`.codeatlas/index.db`) using parallel AST parsing via Rayon and stores symbol metadata, chunks, and graph edges.
 
 ```bash
-# Index current directory (cold run ~100ms, incremental ~6ms)
+# Index current directory with hybrid semantic embeddings (dense vectors + BM25)
 codeatlas index .
+
+# Skip vector embeddings generation (lexical index only)
+codeatlas index --no-embeddings .
 
 # Ultra-fast mode: uses mtime/size metadata caching to skip unchanged file I/O
 codeatlas index --fast .
@@ -129,37 +132,45 @@ codeatlas index . --db /tmp/custom-index.db
 
 **Options:**
 - `[PATH]`: Root path of the codebase to index (default: `.`)
-- `-f, --fast`: Enable ultra-fast indexing mode (metadata-only cache check & in-memory WAL write buffer)
+- `-f, --fast`: Enable ultra-fast indexing mode (metadata-only cache check & in-memory WAL write buffer, skips dense embeddings)
+- `--no-embeddings`: Skip generating semantic dense vector embeddings (lexical indexing only)
 - `--full`: Force re-indexing all files regardless of mtime/content hash
 - `--db <DB>`: Custom path to SQLite index database (default: `.codeatlas/index.db`)
 
 **Example Output:**
 ```text
-⚡ CodeAtlas (Rust) [Fast Mode]
+⚡ CodeAtlas (Rust) [Hybrid Semantic]
   Indexing directory: /Volumes/T7/Personal_MAC_DATA/Personal/github/codeatlas-rs
   Database target:    /Volumes/T7/Personal_MAC_DATA/Personal/github/codeatlas-rs/.codeatlas/index.db
 
 ✓ Indexing Complete
-  Files scanned:   12
-  Files indexed:   12
-  Symbols parsed:  12
-  Chunks indexed:  12
-  Graph edges:     0
-  Total latency:   49 ms
+  Files scanned:   18
+  Files indexed:   18
+  Symbols parsed:  74
+  Chunks indexed:  92
+  Graph edges:     64
+  Vectors embedded:92
+  Total latency:   142 ms
 ```
 
 ---
 
 ### `codeatlas search`
 
-Performs multi-signal hybrid code search using SQLite FTS5 BM25 with Porter stemming, symbol definitions boosting, path noise damping, and optional 1-hop graph neighborhood expansion.
+Performs multi-signal hybrid code search using ONNX Runtime (`ort`) dense vector embeddings combined with SQLite FTS5 BM25 lexical ranking via Reciprocal Rank Fusion (RRF), symbol definitions boosting, path noise damping, and optional 1-hop graph neighborhood expansion.
 
 ```bash
-# Standard search query
+# Standard hybrid search query (BM25 + ONNX dense semantic vectors)
 codeatlas search "CodeGraph"
 
-# Fast sub-millisecond lexical search (direct BM25 scoring)
+# Natural language semantic query
+codeatlas search "how is authentication handled"
+
+# Fast sub-millisecond lexical search (direct BM25 scoring without embeddings or graph)
 codeatlas search "CodeGraph" --fast
+
+# Disable semantic search (use pure lexical BM25)
+codeatlas search "CodeGraph" --no-semantic
 
 # Attach 1-hop graph neighborhood (callers, callees, and imports)
 codeatlas search "Retriever" --expand-graph
@@ -173,7 +184,8 @@ codeatlas search "Database" --json
 
 **Options:**
 - `<QUERY>`: Search string or symbol name
-- `--fast`: Fast search mode (skips graph neighborhood expansion and clustering for sub-millisecond latency)
+- `--fast`: Fast search mode (skips dense embeddings and graph neighborhood expansion for sub-millisecond latency)
+- `--no-semantic`: Disable semantic dense vector search (pure lexical BM25 ranking)
 - `--limit <LIMIT>`: Maximum number of results to display (default: `10`)
 - `--expand-graph`: Attach 1-hop call graph and import neighborhood to top matches
 - `--json`: Format output as JSON
@@ -274,6 +286,45 @@ codeatlas graph export --format json -o graph.json
   "files": 55,
   "symbols": 195
 }
+```
+
+---
+
+### `codeatlas graph symbol`
+
+Inspects a specific symbol's signature, docstring, 1-hop graph neighbors, and incoming callers:
+
+```bash
+# Inspect a symbol
+codeatlas graph symbol PaymentProcessor
+```
+
+---
+
+### `codeatlas watch`
+
+Background file watcher that runs continuous sub-millisecond incremental indexing on save:
+
+```bash
+# Watch current codebase with default 3-second polling interval
+codeatlas watch .
+
+# Custom polling interval
+codeatlas watch . -i 2
+```
+
+---
+
+### `codeatlas hook`
+
+Installs or removes Git hooks (`post-commit`, `post-checkout`, `post-merge`) so every commit or branch switch automatically updates the CodeAtlas index in the background:
+
+```bash
+# Install git hooks
+codeatlas hook install
+
+# Remove git hooks
+codeatlas hook uninstall
 ```
 
 ---

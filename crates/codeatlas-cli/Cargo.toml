@@ -16,7 +16,7 @@ name = "codeatlas"
 path = "src/main.rs"
 
 [dependencies]
-codeatlas-core = { path = "../codeatlas-core", version = "0.1.0" }
+codeatlas-core = { path = "../codeatlas-core", version = "0.2.0" }
 anyhow.workspace = true
 clap.workspace = true
 colored.workspace = true
