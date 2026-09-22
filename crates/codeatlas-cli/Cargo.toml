@@ -20,7 +20,7 @@ name = "codeatlas-bench"
 path = "src/bin/bench.rs"
 
 [dependencies]
-codeatlas-core = { path = "../codeatlas-core", version = "0.2.0" }
+codeatlas-core = { path = "../codeatlas-core", version = "0.3.0" }
 anyhow.workspace = true
 clap.workspace = true
 colored.workspace = true

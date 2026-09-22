@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use codeatlas_core::Engine;
 
 const SERVER_NAME: &str = "codeatlas";
-const SERVER_VERSION: &str = "0.2.0";
+const SERVER_VERSION: &str = "0.3.0";
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
 fn get_tools_def() -> Value {
