@@ -40,6 +40,10 @@ enum Commands {
         #[arg(long)]
         no_embeddings: bool,
 
+        /// Embedding approach: 'model2vec' (default, pure Rust, no ORT) or 'ort' (ONNX Runtime transformer)
+        #[arg(long, default_value = "model2vec")]
+        embedder: String,
+
         /// Custom path to the SQLite index database
         #[arg(long)]
         db: Option<PathBuf>,
@@ -65,6 +69,10 @@ enum Commands {
         /// Disable semantic search (lexical BM25 only)
         #[arg(long)]
         no_semantic: bool,
+
+        /// Embedding approach for query: 'model2vec' (default) or 'ort'
+        #[arg(long, default_value = "model2vec")]
+        embedder: String,
 
         /// Output results as JSON
         #[arg(long)]
@@ -196,26 +204,34 @@ fn resolve_db_path(root: &Path, db: Option<PathBuf>) -> PathBuf {
     }
 }
 
+fn parse_embedder_kind(s: &str) -> codeatlas_core::embedder::EmbedderKind {
+    match s.to_lowercase().as_str() {
+        "ort" | "onnx" | "fastembed" | "bge" => codeatlas_core::embedder::EmbedderKind::Ort,
+        _ => codeatlas_core::embedder::EmbedderKind::Model2Vec,
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Index { path, full, fast, no_embeddings, db } => {
+        Commands::Index { path, full, fast, no_embeddings, embedder, db } => {
             let root = std::fs::canonicalize(&path).unwrap_or(path);
             let db_path = resolve_db_path(&root, db);
+            let kind = parse_embedder_kind(&embedder);
 
             let mode_str = if fast {
                 " [Fast Mode]".yellow().to_string()
             } else if no_embeddings {
                 " [No Embeddings]".dimmed().to_string()
             } else {
-                " [Hybrid Semantic]".magenta().to_string()
+                format!(" [Hybrid Semantic - {}]", kind).magenta().to_string()
             };
             println!("⚡ {}{}", "CodeAtlas (Rust)".bold().cyan(), mode_str);
             println!("  Indexing directory: {}", root.display().to_string().yellow());
             println!("  Database target:    {}", db_path.display().to_string().dimmed());
 
-            let mut engine = Engine::open(&root, &db_path)?;
+            let mut engine = Engine::with_embedder_kind(&root, &db_path, kind)?;
             let report = engine.index_with_options(full, fast || no_embeddings)?;
 
             println!("\n{}", "✓ Indexing Complete".bold().green());
@@ -237,11 +253,13 @@ fn main() -> Result<()> {
             expand_graph,
             fast,
             no_semantic,
+            embedder,
             json,
             db,
         } => {
             let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             let db_path = resolve_db_path(&root, db);
+            let kind = parse_embedder_kind(&embedder);
 
             if !db_path.exists() {
                 eprintln!(
@@ -252,7 +270,7 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
 
-            let engine = Engine::open(&root, &db_path)?;
+            let engine = Engine::with_embedder_kind(&root, &db_path, kind)?;
             let results = engine.search_with_options(&query, limit, expand_graph, fast || no_semantic)?;
 
             if json {

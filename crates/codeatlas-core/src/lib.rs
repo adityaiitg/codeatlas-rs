@@ -43,6 +43,23 @@ pub struct Engine {
 
 impl Engine {
     pub fn open<P1: AsRef<Path>, P2: AsRef<Path>>(root: P1, db_path: P2) -> Result<Self> {
+        Self::with_embedder_kind(root, db_path, crate::embedder::EmbedderKind::Model2Vec)
+    }
+
+    pub fn with_embedder_kind<P1: AsRef<Path>, P2: AsRef<Path>>(
+        root: P1,
+        db_path: P2,
+        kind: crate::embedder::EmbedderKind,
+    ) -> Result<Self> {
+        let embedder = Arc::new(CodeEmbedder::with_kind(kind));
+        Self::with_embedder(root, db_path, embedder)
+    }
+
+    pub fn with_embedder<P1: AsRef<Path>, P2: AsRef<Path>>(
+        root: P1,
+        db_path: P2,
+        embedder: Arc<CodeEmbedder>,
+    ) -> Result<Self> {
         let root_path = root.as_ref().to_path_buf();
         let db_path = db_path.as_ref().to_path_buf();
         let db = Database::open(&db_path)
@@ -60,8 +77,6 @@ impl Engine {
                 graph.add_edge(edge);
             }
         }
-
-        let embedder = Arc::new(CodeEmbedder::new());
 
         Ok(Self {
             root_path,

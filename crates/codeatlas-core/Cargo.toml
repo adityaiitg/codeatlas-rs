@@ -29,3 +29,9 @@ tokenizers.workspace = true
 safetensors.workspace = true
 hf-hub.workspace = true
 half.workspace = true
+fastembed = { workspace = true, optional = true }
+
+[features]
+default = ["model2vec", "ort"]
+model2vec = []
+ort = ["dep:fastembed"]

@@ -40,3 +40,4 @@ tokenizers = { version = "0.23", default-features = false, features = ["fancy-re
 safetensors = "0.8"
 hf-hub = "0.5"
 half = "2.7"
+fastembed = { version = "7.0.1", default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }

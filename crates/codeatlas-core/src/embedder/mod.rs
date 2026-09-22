@@ -6,6 +6,7 @@ use half::f16;
 use hf_hub::api::sync::ApiBuilder;
 use safetensors::tensor::Dtype;
 use safetensors::SafeTensors;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokenizers::Tokenizer;
 use tracing::{debug, info};
@@ -13,6 +14,24 @@ use tracing::{debug, info};
 /// Default Model2Vec static code embedding model.
 /// Exact same model used by Python CodeAtlas for 100% representation parity.
 pub const DEFAULT_MODEL2VEC_ID: &str = "minishlab/potion-code-16M-v2";
+
+/// The embedding engine/approach selected for semantic code search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EmbedderKind {
+    /// Pure Rust Model2Vec static embeddings (zero ORT/C++ dependencies, sub-millisecond).
+    Model2Vec,
+    /// ONNX Runtime (`ort`) deep transformer embeddings (e.g. BGE Small English v1.5).
+    Ort,
+}
+
+impl std::fmt::Display for EmbedderKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Model2Vec => write!(f, "Model2Vec (pure Rust)"),
+            Self::Ort => write!(f, "ONNX Runtime (ort)"),
+        }
+    }
+}
 
 /// Serialize an f32 vector into little-endian bytes for compact BLOB storage in SQLite.
 pub fn embedding_to_bytes(vec: &[f32]) -> Vec<u8> {
@@ -195,11 +214,18 @@ impl Model2VecInner {
     }
 }
 
-/// Thread-safe Model2Vec embedder for semantic code search.
-/// Models are lazily loaded on first embedding request.
+enum EmbedderBackend {
+    Model2Vec(Arc<Model2VecInner>),
+    #[cfg(feature = "ort")]
+    Ort(Box<std::sync::Mutex<fastembed::TextEmbedding>>),
+}
+
+/// Dual-engine text embedder supporting both pure-Rust Model2Vec and ONNX Runtime (`ort`).
+/// Models are lazily loaded on the first embedding request.
 pub struct CodeEmbedder {
-    model: RwLock<Option<Arc<Model2VecInner>>>,
-    model_id: String,
+    backend: RwLock<Option<EmbedderBackend>>,
+    kind: EmbedderKind,
+    model_name: String,
     local_dir: Option<PathBuf>,
 }
 
@@ -210,43 +236,60 @@ impl Default for CodeEmbedder {
 }
 
 impl CodeEmbedder {
-    /// Create a new CodeEmbedder with the default `minishlab/potion-code-16M-v2` model.
+    /// Create a new CodeEmbedder with the default pure-Rust Model2Vec approach.
     pub fn new() -> Self {
+        Self::with_kind(EmbedderKind::Model2Vec)
+    }
+
+    /// Create an embedder specifying the approach (`EmbedderKind::Model2Vec` or `EmbedderKind::Ort`).
+    pub fn with_kind(kind: EmbedderKind) -> Self {
+        let model_name = match kind {
+            EmbedderKind::Model2Vec => DEFAULT_MODEL2VEC_ID.to_string(),
+            EmbedderKind::Ort => "BGESmallENV15".to_string(),
+        };
         Self {
-            model: RwLock::new(None),
-            model_id: DEFAULT_MODEL2VEC_ID.to_string(),
+            backend: RwLock::new(None),
+            kind,
+            model_name,
             local_dir: None,
         }
     }
 
-    /// Create a new CodeEmbedder with a specific HuggingFace model repo ID.
-    pub fn with_model(model_id: impl Into<String>) -> Self {
+    /// Create an embedder specifying the approach and a custom model ID.
+    pub fn with_options(kind: EmbedderKind, model_name: impl Into<String>) -> Self {
         Self {
-            model: RwLock::new(None),
-            model_id: model_id.into(),
+            backend: RwLock::new(None),
+            kind,
+            model_name: model_name.into(),
             local_dir: None,
         }
     }
 
-    /// Create a CodeEmbedder that loads from a local directory containing model files.
+    /// Create a Model2Vec embedder from a local directory containing model files.
     pub fn with_local_dir<P: Into<PathBuf>>(dir: P) -> Self {
         Self {
-            model: RwLock::new(None),
-            model_id: DEFAULT_MODEL2VEC_ID.to_string(),
+            backend: RwLock::new(None),
+            kind: EmbedderKind::Model2Vec,
+            model_name: DEFAULT_MODEL2VEC_ID.to_string(),
             local_dir: Some(dir.into()),
         }
     }
 
-    /// Check if the model is currently initialized and loaded in memory.
-    pub fn is_initialized(&self) -> bool {
-        self.model.read().map(|m| m.is_some()).unwrap_or(false)
+    /// Get the active embedder kind.
+    pub fn kind(&self) -> EmbedderKind {
+        self.kind
     }
 
-    /// Ensure the Model2Vec model is loaded. Downloads via HuggingFace Hub on first use.
+    /// Check if the model is currently initialized and loaded in memory.
+    pub fn is_initialized(&self) -> bool {
+        self.backend.read().map(|m| m.is_some()).unwrap_or(false)
+    }
+
+    /// Ensure the selected embedding model is initialized.
     pub fn ensure_initialized(&self) -> Result<()> {
         {
             let guard = self
-                .model
+                .backend
                 .read()
                 .map_err(|e| anyhow!("Embedder lock poisoned: {}", e))?;
             if guard.is_some() {
@@ -255,63 +298,95 @@ impl CodeEmbedder {
         }
 
         let mut guard = self
-            .model
+            .backend
             .write()
             .map_err(|e| anyhow!("Embedder lock poisoned: {}", e))?;
 
         if guard.is_none() {
-            debug!("Initializing pure-Rust Model2Vec embedder: {}", self.model_id);
+            match self.kind {
+                EmbedderKind::Model2Vec => {
+                    debug!("Initializing pure-Rust Model2Vec embedder: {}", self.model_name);
 
-            let inner = if let Some(ref dir) = self.local_dir {
-                let model_path = dir.join("model.safetensors");
-                let tok_path = dir.join("tokenizer.json");
-                let cfg_path = dir.join("config.json");
-                Model2VecInner::from_files(&model_path, &tok_path, Some(&cfg_path))?
-            } else {
-                let api = ApiBuilder::new()
-                    .build()
-                    .map_err(|e| anyhow!("Failed to build HuggingFace API: {}", e))?;
-                let repo = api.model(self.model_id.clone());
+                    let inner = if let Some(ref dir) = self.local_dir {
+                        let model_path = dir.join("model.safetensors");
+                        let tok_path = dir.join("tokenizer.json");
+                        let cfg_path = dir.join("config.json");
+                        Model2VecInner::from_files(&model_path, &tok_path, Some(&cfg_path))?
+                    } else {
+                        let api = ApiBuilder::new()
+                            .build()
+                            .map_err(|e| anyhow!("Failed to build HuggingFace API: {}", e))?;
+                        let repo = api.model(self.model_name.clone());
 
-                let model_path = repo
-                    .get("model.safetensors")
-                    .map_err(|e| anyhow!("Failed to download model.safetensors for {}: {}", self.model_id, e))?;
-                let tokenizer_path = repo
-                    .get("tokenizer.json")
-                    .map_err(|e| anyhow!("Failed to download tokenizer.json for {}: {}", self.model_id, e))?;
-                let config_path = repo.get("config.json").ok();
+                        let model_path = repo
+                            .get("model.safetensors")
+                            .map_err(|e| anyhow!("Failed to download model.safetensors for {}: {}", self.model_name, e))?;
+                        let tokenizer_path = repo
+                            .get("tokenizer.json")
+                            .map_err(|e| anyhow!("Failed to download tokenizer.json for {}: {}", self.model_name, e))?;
+                        let config_path = repo.get("config.json").ok();
 
-                Model2VecInner::from_files(&model_path, &tokenizer_path, config_path.as_deref())?
-            };
+                        Model2VecInner::from_files(&model_path, &tokenizer_path, config_path.as_deref())?
+                    };
 
-            info!(
-                "Model2Vec embedding model '{}' loaded (dim: {}, vocab: {})",
-                self.model_id,
-                inner.dim(),
-                inner.vocab_size
-            );
-            *guard = Some(Arc::new(inner));
+                    info!(
+                        "Model2Vec embedding model '{}' loaded (dim: {}, vocab: {})",
+                        self.model_name,
+                        inner.dim(),
+                        inner.vocab_size
+                    );
+                    *guard = Some(EmbedderBackend::Model2Vec(Arc::new(inner)));
+                }
+                EmbedderKind::Ort => {
+                    #[cfg(feature = "ort")]
+                    {
+                        debug!("Initializing ONNX Runtime embedder: {}", self.model_name);
+                        let opts = fastembed::TextInitOptions::new(fastembed::EmbeddingModel::BGESmallENV15)
+                            .with_show_download_progress(false);
+                        let model = fastembed::TextEmbedding::try_new(opts)
+                            .map_err(|e| anyhow!("Failed to initialize ONNX Runtime model: {}", e))?;
+                        info!("ONNX Runtime (ort) embedder initialized (BGE-small-en-v1.5)");
+                        *guard = Some(EmbedderBackend::Ort(Box::new(std::sync::Mutex::new(model))));
+                    }
+                    #[cfg(not(feature = "ort"))]
+                    {
+                        bail!("ORT backend was disabled at compile time. Recompile codeatlas with `--features ort` to enable ONNX Runtime.");
+                    }
+                }
+            }
         }
 
         Ok(())
     }
 
-    /// Generate vector embeddings for a slice of text strings using Model2Vec.
+    /// Generate vector embeddings for a slice of text strings using the active approach.
     pub fn embed<S: AsRef<str> + Sync>(&self, texts: &[S]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
         self.ensure_initialized()?;
         let guard = self
-            .model
+            .backend
             .read()
             .map_err(|e| anyhow!("Embedder lock poisoned: {}", e))?;
 
-        let model = guard
+        let backend = guard
             .as_ref()
-            .context("Embedding model not loaded")?;
+            .context("Embedding model backend not loaded")?;
 
-        model.encode_batch(texts)
+        match backend {
+            EmbedderBackend::Model2Vec(m) => m.encode_batch(texts),
+            #[cfg(feature = "ort")]
+            EmbedderBackend::Ort(m) => {
+                let mut model = m
+                    .lock()
+                    .map_err(|e| anyhow!("ORT mutex poisoned: {}", e))?;
+                let str_refs: Vec<&str> = texts.iter().map(|t| t.as_ref()).collect();
+                model
+                    .embed(str_refs, Some(64))
+                    .map_err(|e| anyhow!("ORT embed error: {}", e))
+            }
+        }
     }
 
     /// Embed a single search query text.
@@ -347,5 +422,11 @@ mod tests {
         assert!((cosine_similarity(&a, &b) - 1.0).abs() < 1e-5);
         assert!((cosine_similarity(&a, &c) - 0.0).abs() < 1e-5);
         assert!((cosine_similarity(&a, &d) - (-1.0)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_embedder_kind_display() {
+        assert_eq!(format!("{}", EmbedderKind::Model2Vec), "Model2Vec (pure Rust)");
+        assert_eq!(format!("{}", EmbedderKind::Ort), "ONNX Runtime (ort)");
     }
 }

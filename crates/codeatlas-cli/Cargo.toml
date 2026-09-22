@@ -29,3 +29,8 @@ tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+
+[features]
+default = ["model2vec", "ort"]
+model2vec = ["codeatlas-core/model2vec"]
+ort = ["codeatlas-core/ort"]
