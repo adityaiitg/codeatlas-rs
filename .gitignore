@@ -14,5 +14,6 @@
 *.swp
 *.swo
 
-# CodeAtlas internal DB
+# CodeAtlas internal DB & model cache
 .codeatlas/
+.fastembed_cache/

@@ -15,6 +15,10 @@ categories.workspace = true
 name = "codeatlas"
 path = "src/main.rs"
 
+[[bin]]
+name = "codeatlas-bench"
+path = "src/bin/bench.rs"
+
 [dependencies]
 codeatlas-core = { path = "../codeatlas-core", version = "0.2.0" }
 anyhow.workspace = true
@@ -24,3 +28,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
