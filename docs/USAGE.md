@@ -157,10 +157,10 @@ codeatlas index . --db /tmp/custom-index.db
 
 ### `codeatlas search`
 
-Performs multi-signal hybrid code search using ONNX Runtime (`ort`) dense vector embeddings combined with SQLite FTS5 BM25 lexical ranking via Reciprocal Rank Fusion (RRF), symbol definitions boosting, path noise damping, and optional 1-hop graph neighborhood expansion.
+Performs multi-signal hybrid code search using pure-Rust Model2Vec (`potion-code-16M-v2`) dense vector embeddings combined with SQLite FTS5 BM25 lexical ranking via Reciprocal Rank Fusion (RRF), symbol definitions boosting, path noise damping, and optional 1-hop graph neighborhood expansion (zero ONNX Runtime or C++ dependencies required).
 
 ```bash
-# Standard hybrid search query (BM25 + ONNX dense semantic vectors)
+# Standard hybrid search query (BM25 + Model2Vec dense semantic vectors)
 codeatlas search "CodeGraph"
 
 # Natural language semantic query

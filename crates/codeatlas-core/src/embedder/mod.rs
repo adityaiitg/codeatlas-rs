@@ -1,8 +1,18 @@
-use std::path::PathBuf;
-use std::sync::Mutex;
-use anyhow::{Context, Result};
-use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
-use tracing::{debug, info, warn};
+use std::fs::File;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+use anyhow::{anyhow, bail, Context, Result};
+use half::f16;
+use hf_hub::api::sync::ApiBuilder;
+use safetensors::tensor::Dtype;
+use safetensors::SafeTensors;
+use serde_json::Value;
+use tokenizers::Tokenizer;
+use tracing::{debug, info};
+
+/// Default Model2Vec static code embedding model.
+/// Exact same model used by Python CodeAtlas for 100% representation parity.
+pub const DEFAULT_MODEL2VEC_ID: &str = "minishlab/potion-code-16M-v2";
 
 /// Serialize an f32 vector into little-endian bytes for compact BLOB storage in SQLite.
 pub fn embedding_to_bytes(vec: &[f32]) -> Vec<u8> {
@@ -43,12 +53,154 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a.sqrt() * norm_b.sqrt())
 }
 
-/// Thread-safe ONNX Runtime (`ort`) text embedder for semantic search.
+/// Static Model2Vec embedding engine implemented in 100% pure Rust.
+/// No ONNX Runtime (`ort`), no PyTorch, and zero C++ dynamic library dependencies.
+pub struct Model2VecInner {
+    tokenizer: Tokenizer,
+    embeddings: Vec<f32>,
+    dim: usize,
+    vocab_size: usize,
+    normalize: bool,
+}
+
+impl Model2VecInner {
+    /// Load a Model2Vec model from local safetensors, tokenizer.json, and optional config.json.
+    pub fn from_files(
+        model_path: &Path,
+        tokenizer_path: &Path,
+        config_path: Option<&Path>,
+    ) -> Result<Self> {
+        let tokenizer = Tokenizer::from_file(tokenizer_path)
+            .map_err(|e| anyhow!("Failed to load tokenizer from {}: {}", tokenizer_path.display(), e))?;
+
+        let normalize = if let Some(cfg_p) = config_path {
+            if let Ok(file) = File::open(cfg_p) {
+                let v: Value = serde_json::from_reader(file).unwrap_or(Value::Null);
+                v.get("normalize").and_then(Value::as_bool).unwrap_or(true)
+            } else {
+                true
+            }
+        } else {
+            true
+        };
+
+        let model_bytes = std::fs::read(model_path)
+            .with_context(|| format!("Failed to read safetensors at {}", model_path.display()))?;
+
+        let tensors = SafeTensors::deserialize(&model_bytes)
+            .context("Failed to parse safetensors data")?;
+
+        let tensor = tensors
+            .tensor("embeddings")
+            .or_else(|_| tensors.tensor("0"))
+            .context("No 'embeddings' tensor found in safetensors")?;
+
+        let shape = tensor.shape();
+        if shape.len() != 2 {
+            bail!("Expected 2D embedding tensor, got shape {:?}", shape);
+        }
+        let vocab_size = shape[0];
+        let dim = shape[1];
+        let raw = tensor.data();
+
+        let embeddings: Vec<f32> = match tensor.dtype() {
+            Dtype::F32 => raw
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect(),
+            Dtype::F16 => raw
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| f16::from_le_bytes(*b).to_f32())
+                .collect(),
+            Dtype::I8 => raw.iter().map(|&b| b as i8 as f32).collect(),
+            other => bail!("Unsupported tensor dtype: {:?}", other),
+        };
+
+        if embeddings.len() != vocab_size * dim {
+            bail!(
+                "Mismatch in embedding matrix length: expected {} ({}x{}), got {}",
+                vocab_size * dim,
+                vocab_size,
+                dim,
+                embeddings.len()
+            );
+        }
+
+        Ok(Self {
+            tokenizer,
+            embeddings,
+            dim,
+            vocab_size,
+            normalize,
+        })
+    }
+
+    /// Encode a single text string into an L2-normalized dense vector.
+    pub fn encode_one(&self, text: &str) -> Result<Vec<f32>> {
+        let encoding = self
+            .tokenizer
+            .encode(text, false)
+            .map_err(|e| anyhow!("Tokenization failed: {}", e))?;
+
+        let ids = encoding.get_ids();
+        let mut out = vec![0.0f32; self.dim];
+
+        if ids.is_empty() {
+            return Ok(out);
+        }
+
+        let mut count = 0usize;
+        for &id in ids {
+            let id_idx = id as usize;
+            if id_idx < self.vocab_size {
+                let offset = id_idx * self.dim;
+                let slice = &self.embeddings[offset..offset + self.dim];
+                for i in 0..self.dim {
+                    out[i] += slice[i];
+                }
+                count += 1;
+            }
+        }
+
+        if count == 0 {
+            return Ok(out);
+        }
+
+        if self.normalize {
+            let norm = out.iter().map(|&v| v * v).sum::<f32>().sqrt().max(1e-12);
+            for v in &mut out {
+                *v /= norm;
+            }
+        } else {
+            let c = count as f32;
+            for v in &mut out {
+                *v /= c;
+            }
+        }
+
+        Ok(out)
+    }
+
+    /// Encode a batch of texts into dense vectors.
+    pub fn encode_batch<S: AsRef<str> + Sync>(&self, texts: &[S]) -> Result<Vec<Vec<f32>>> {
+        texts.iter().map(|t| self.encode_one(t.as_ref())).collect()
+    }
+
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+}
+
+/// Thread-safe Model2Vec embedder for semantic code search.
 /// Models are lazily loaded on first embedding request.
 pub struct CodeEmbedder {
-    model: Mutex<Option<TextEmbedding>>,
-    model_name: EmbeddingModel,
-    cache_dir: Option<PathBuf>,
+    model: RwLock<Option<Arc<Model2VecInner>>>,
+    model_id: String,
+    local_dir: Option<PathBuf>,
 }
 
 impl Default for CodeEmbedder {
@@ -58,79 +210,108 @@ impl Default for CodeEmbedder {
 }
 
 impl CodeEmbedder {
-    /// Create a new CodeEmbedder using the default BGE Small English v1.5 model.
+    /// Create a new CodeEmbedder with the default `minishlab/potion-code-16M-v2` model.
     pub fn new() -> Self {
         Self {
-            model: Mutex::new(None),
-            model_name: EmbeddingModel::BGESmallENV15,
-            cache_dir: None,
+            model: RwLock::new(None),
+            model_id: DEFAULT_MODEL2VEC_ID.to_string(),
+            local_dir: None,
         }
     }
 
-    /// Create a new CodeEmbedder with a specific model and cache directory.
-    pub fn with_options(model_name: EmbeddingModel, cache_dir: Option<PathBuf>) -> Self {
+    /// Create a new CodeEmbedder with a specific HuggingFace model repo ID.
+    pub fn with_model(model_id: impl Into<String>) -> Self {
         Self {
-            model: Mutex::new(None),
-            model_name,
-            cache_dir,
+            model: RwLock::new(None),
+            model_id: model_id.into(),
+            local_dir: None,
         }
     }
 
-    /// Check if the model is currently initialized and ready.
-    pub fn is_initialized(&self) -> bool {
-        self.model.lock().map(|m| m.is_some()).unwrap_or(false)
+    /// Create a CodeEmbedder that loads from a local directory containing model files.
+    pub fn with_local_dir<P: Into<PathBuf>>(dir: P) -> Self {
+        Self {
+            model: RwLock::new(None),
+            model_id: DEFAULT_MODEL2VEC_ID.to_string(),
+            local_dir: Some(dir.into()),
+        }
     }
 
-    /// Ensure the model is initialized. Downloads and instantiates the ONNX model if needed.
+    /// Check if the model is currently initialized and loaded in memory.
+    pub fn is_initialized(&self) -> bool {
+        self.model.read().map(|m| m.is_some()).unwrap_or(false)
+    }
+
+    /// Ensure the Model2Vec model is loaded. Downloads via HuggingFace Hub on first use.
     pub fn ensure_initialized(&self) -> Result<()> {
+        {
+            let guard = self
+                .model
+                .read()
+                .map_err(|e| anyhow!("Embedder lock poisoned: {}", e))?;
+            if guard.is_some() {
+                return Ok(());
+            }
+        }
+
         let mut guard = self
             .model
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Embedder mutex poisoned: {}", e))?;
+            .write()
+            .map_err(|e| anyhow!("Embedder lock poisoned: {}", e))?;
 
         if guard.is_none() {
-            debug!("Initializing ONNX Runtime embedding model: {:?}", self.model_name);
-            let mut opts = TextInitOptions::new(self.model_name.clone());
-            if let Some(ref cache) = self.cache_dir {
-                opts = opts.with_cache_dir(cache.clone());
-            }
-            opts = opts.with_show_download_progress(false);
+            debug!("Initializing pure-Rust Model2Vec embedder: {}", self.model_id);
 
-            match TextEmbedding::try_new(opts) {
-                Ok(instance) => {
-                    info!("ONNX Runtime embedding model initialized successfully");
-                    *guard = Some(instance);
-                }
-                Err(err) => {
-                    warn!("Failed to initialize ONNX Runtime embedding model: {}", err);
-                    return Err(anyhow::anyhow!("ONNX embedding initialization failed: {}", err));
-                }
-            }
+            let inner = if let Some(ref dir) = self.local_dir {
+                let model_path = dir.join("model.safetensors");
+                let tok_path = dir.join("tokenizer.json");
+                let cfg_path = dir.join("config.json");
+                Model2VecInner::from_files(&model_path, &tok_path, Some(&cfg_path))?
+            } else {
+                let api = ApiBuilder::new()
+                    .build()
+                    .map_err(|e| anyhow!("Failed to build HuggingFace API: {}", e))?;
+                let repo = api.model(self.model_id.clone());
+
+                let model_path = repo
+                    .get("model.safetensors")
+                    .map_err(|e| anyhow!("Failed to download model.safetensors for {}: {}", self.model_id, e))?;
+                let tokenizer_path = repo
+                    .get("tokenizer.json")
+                    .map_err(|e| anyhow!("Failed to download tokenizer.json for {}: {}", self.model_id, e))?;
+                let config_path = repo.get("config.json").ok();
+
+                Model2VecInner::from_files(&model_path, &tokenizer_path, config_path.as_deref())?
+            };
+
+            info!(
+                "Model2Vec embedding model '{}' loaded (dim: {}, vocab: {})",
+                self.model_id,
+                inner.dim(),
+                inner.vocab_size
+            );
+            *guard = Some(Arc::new(inner));
         }
+
         Ok(())
     }
 
-    /// Generate vector embeddings for a slice of text strings.
-    pub fn embed<S: AsRef<str> + Send + Sync>(&self, texts: &[S]) -> Result<Vec<Vec<f32>>> {
+    /// Generate vector embeddings for a slice of text strings using Model2Vec.
+    pub fn embed<S: AsRef<str> + Sync>(&self, texts: &[S]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
         self.ensure_initialized()?;
-        let mut guard = self
+        let guard = self
             .model
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Embedder mutex poisoned: {}", e))?;
+            .read()
+            .map_err(|e| anyhow!("Embedder lock poisoned: {}", e))?;
 
         let model = guard
-            .as_mut()
+            .as_ref()
             .context("Embedding model not loaded")?;
 
-        let text_refs: Vec<&str> = texts.iter().map(|t| t.as_ref()).collect();
-        let embeddings = model
-            .embed(text_refs, Some(64))
-            .map_err(|e| anyhow::anyhow!("ONNX inference error: {}", e))?;
-
-        Ok(embeddings)
+        model.encode_batch(texts)
     }
 
     /// Embed a single search query text.

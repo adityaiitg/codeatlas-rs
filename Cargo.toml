@@ -35,5 +35,8 @@ sha2 = "0.10"
 regex = "1.10"
 clap = { version = "4.5", features = ["derive", "env", "cargo"] }
 colored = "2.1"
-fastembed = { version = "7.0.1", default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
 tempfile = "3.10"
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
+safetensors = "0.8"
+hf-hub = "0.5"
+half = "2.7"
