@@ -106,6 +106,8 @@ cargo install --path crates/codeatlas-mcp
   - Native JSON-RPC 2.0 stdio server (`codeatlas-mcp`).
   - Compatible with Claude Code, Cursor, OpenCode, Codex, and Windsurf.
   - One-command agent auto-installer (`codeatlas install all`, `codeatlas install claude`, `codeatlas install cursor`).
+- **VS Code & Cursor IDE Extension**:
+  - Full graphical editor integration at [codeatlas-vscode](https://github.com/adityaiitg/codeatlas-vscode) with sidebar search, caller impact trees, interactive D3.js knowledge graph, and live CodeLens annotations.
 
 ---
 
